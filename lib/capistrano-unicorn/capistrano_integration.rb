@@ -83,8 +83,8 @@ module CapistranoUnicorn
         # Start the Unicorn server
         #
         def start_unicorn
-          primary_config_path = "#{current_path}/config/unicorn.rb"
-          secondary_config_path = "#{current_path}/config/unicorn/#{unicorn_env}.rb"
+          primary_config_path = "#{current_path}/config/unicorn/#{unicorn_env}.rb"
+          secondary_config_path = "#{current_path}/config/unicorn.rb"
 
           script = <<-END
             if [ -e #{primary_config_path} ]; then
