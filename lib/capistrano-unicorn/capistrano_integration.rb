@@ -7,7 +7,8 @@ module CapistranoUnicorn
       'unicorn:start',
       'unicorn:stop',
       'unicorn:restart',
-      'unicorn:reload', 
+      'unicorn:duplicate',
+      'unicorn:reload',
       'unicorn:shutdown',
       'unicorn:add_worker',
       'unicorn:remove_worker'
@@ -16,17 +17,21 @@ module CapistranoUnicorn
     def self.load_into(capistrano_config)
       capistrano_config.load do
         before(CapistranoIntegration::TASKS) do
-          _cset(:app_env)        { (fetch(:rails_env) rescue 'production') }
-          _cset(:unicorn_pid)    { "#{fetch(:current_path)}/tmp/pids/unicorn.pid" }
-          _cset(:unicorn_env)    { fetch(:app_env) }
-          _cset(:unicorn_bin)    { "unicorn" }
-          _cset(:unicorn_bundle) { fetch(:bundle_cmd) rescue 'bundle' }
+          _cset(:app_env)                    { (fetch(:rails_env) rescue 'production') }
+          _cset(:unicorn_pid)                { "#{fetch(:current_path)}/tmp/pids/unicorn.pid" }
+          _cset(:unicorn_env)                { fetch(:app_env) }
+          _cset(:unicorn_bin)                { "unicorn" }
+          _cset(:unicorn_bundle)             { fetch(:bundle_cmd) rescue 'bundle' }
+          _cset(:unicorn_restart_sleep_time) { 2 }
+          _cset(:unicorn_user)               { nil }
+          _cset(:unicorn_config_path)        { "#{fetch(:current_path)}/config" }
+          _cset(:unicorn_config_filename)    { "unicorn.rb" }
         end
 
         # Check if a remote process exists using its pid file
         #
         def remote_process_exists?(pid_file)
-          "[ -e #{pid_file} ] && kill -0 `cat #{pid_file}` > /dev/null 2>&1"
+          "[ -e #{pid_file} ] && #{try_unicorn_user} kill -0 `cat #{pid_file}` > /dev/null 2>&1"
         end
 
         # Stale Unicorn process pid file
@@ -62,7 +67,14 @@ module CapistranoUnicorn
         # Send a signal to a unicorn master processes
         #
         def unicorn_send_signal(signal, pid=get_unicorn_pid)
-          "#{try_sudo} kill -s #{signal} #{pid}"
+          "#{try_unicorn_user} kill -s #{signal} #{pid}"
+        end
+
+        # Run a command as the :unicorn_user user if :unicorn_user is a string.
+        # Otherwise run as default (:user) user.
+        #
+        def try_unicorn_user
+          "#{sudo :as => unicorn_user.to_s}" if unicorn_user.kind_of?(String)
         end
 
         # Kill Unicorns in multiple ways O_O
@@ -99,19 +111,36 @@ module CapistranoUnicorn
             fi;
 
             if [ -e #{unicorn_pid} ]; then
-              if kill -0 `cat #{unicorn_pid}` > /dev/null 2>&1; then
+              if #{try_unicorn_user} kill -0 `cat #{unicorn_pid}` > /dev/null 2>&1; then
                 echo "Unicorn is already running!";
                 exit 0;
               fi;
 
-              rm #{unicorn_pid};
+              #{try_unicorn_user} rm #{unicorn_pid};
             fi;
 
             echo "Starting Unicorn...";
-            cd #{current_path} && BUNDLE_GEMFILE=#{current_path}/Gemfile #{unicorn_bundle} exec #{unicorn_bin} -c $UNICORN_CONFIG_PATH -E #{app_env} -D;
+            cd #{current_path} && #{try_unicorn_user} BUNDLE_GEMFILE=#{current_path}/Gemfile #{unicorn_bundle} exec #{unicorn_bin} -c $UNICORN_CONFIG_PATH -E #{app_env} -D;
           END
 
           script
+        end
+
+        def duplicate_unicorn
+          script = <<-END
+            if #{unicorn_is_running?}; then
+              echo "Duplicating Unicorn...";
+              #{unicorn_send_signal('USR2')};
+            else
+              #{start_unicorn}
+            fi;
+          END
+
+          script
+        end
+
+        def unicorn_roles
+          fetch(:unicorn_roles, :app)
         end
 
         #
@@ -119,22 +148,22 @@ module CapistranoUnicorn
         #
         namespace :unicorn do
           desc 'Start Unicorn master process'
-          task :start, :roles => :app, :except => {:no_release => true} do
+          task :start, :roles => unicorn_roles, :except => {:no_release => true} do
             run start_unicorn
           end
 
           desc 'Stop Unicorn'
-          task :stop, :roles => :app, :except => {:no_release => true} do
+          task :stop, :roles => unicorn_roles, :except => {:no_release => true} do
             run kill_unicorn('QUIT')
           end
 
           desc 'Immediately shutdown Unicorn'
-          task :shutdown, :roles => :app, :except => {:no_release => true} do
+          task :shutdown, :roles => unicorn_roles, :except => {:no_release => true} do
             run kill_unicorn('TERM')
           end
 
           desc 'Restart Unicorn'
-          task :restart, :roles => :app, :except => {:no_release => true} do
+          task :restart, :roles => unicorn_roles, :except => {:no_release => true} do
             run <<-END
               if #{unicorn_is_running?}; then
                 echo "Restarting Unicorn...";
@@ -145,8 +174,13 @@ module CapistranoUnicorn
             END
           end
 
+          desc 'Duplicate Unicorn'
+          task :duplicate, :roles => unicorn_roles, :except => {:no_release => true} do
+            run duplicate_unicorn()
+          end
+
           desc 'Reload Unicorn'
-          task :reload, :roles => :app, :except => {:no_release => true} do
+          task :reload, :roles => unicorn_roles, :except => {:no_release => true} do
             run <<-END
               if #{unicorn_is_running?}; then
                 echo "Reloading Unicorn...";
@@ -158,7 +192,7 @@ module CapistranoUnicorn
           end
 
           desc 'Add a new worker'
-          task :add_worker, :roles => :app, :except => {:no_release => true} do
+          task :add_worker, :roles => unicorn_roles, :except => {:no_release => true} do
             run <<-END
               if #{unicorn_is_running?}; then
                 echo "Adding a new Unicorn worker...";
@@ -170,7 +204,7 @@ module CapistranoUnicorn
           end
 
           desc 'Remove amount of workers'
-          task :remove_worker, :roles => :app, :except => {:no_release => true} do
+          task :remove_worker, :roles => unicorn_roles, :except => {:no_release => true} do
             run <<-END
               if #{unicorn_is_running?}; then
                 echo "Removing a Unicorn worker...";
