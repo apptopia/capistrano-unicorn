@@ -165,11 +165,12 @@ module CapistranoUnicorn
           desc 'Restart Unicorn'
           task :restart, :roles => unicorn_roles, :except => {:no_release => true} do
             run <<-END
-              if #{unicorn_is_running?}; then
-                echo "Restarting Unicorn...";
-                #{unicorn_send_signal('USR2')};
-              else
-                #{start_unicorn}
+              #{duplicate_unicorn}
+
+              sleep #{unicorn_restart_sleep_time}; # in order to wait for the (old) pidfile to show up
+
+              if #{old_unicorn_is_running?}; then
+                #{unicorn_send_signal('QUIT', get_old_unicorn_pid)};
               fi;
             END
           end
